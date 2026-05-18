@@ -9,6 +9,8 @@ include(FreeRTOS_Kernel_import.cmake)
 # Example running FreeRTOS on 1 core
 add_executable(pico_emb
     main.c
+    hc06.c
+    hc06.h
     )
 
 target_include_directories(pico_emb PRIVATE

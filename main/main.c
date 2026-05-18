@@ -3,54 +3,141 @@
 #include "semphr.h"
 #include <stdio.h>
 
-#include <stdio.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
+#include "hardware/irq.h"
+#include "hardware/uart.h"
+#include "hc06.h"
 
+// PINS
+#define BTN_PIN 16
+#define HC06_NAME "RAFA"
 
-/* Semaphores */
-SemaphoreHandle_t semaphores[4];
+// Semaforos
+SemaphoreHandle_t xSemaphorePIN;
 
-/* Task function */
-void vTask(void *pvParameters)
-{
-    int taskNum = (int)pvParameters;
+typedef struct config_data {
+    char *name;
+    char *pin;
+} config_data_t;
 
-    for (;;)
-    {
-        // Wait for my semaphore
-        xSemaphoreTake(semaphores[taskNum], portMAX_DELAY);
+// Filas
+QueueHandle_t xQueuePIN;
+QueueHandle_t xQueueConfig;
+QueueHandle_t xQueueRX;
+QueueHandle_t xQueueTX;
 
-        // Critical section: do my work
-        printf("Hello from task %d\n", taskNum + 1);
+void uart_rx_handler() {
+    uint8_t ch = uart_getc(HC06_UART_ID);
+    xQueueSendFromISR(xQueueRX, &ch, 0);
+}
 
-        // Release next task’s semaphore
-        int nextTask = (taskNum + 1) % 4;
-        vTaskDelay(pdTICKS_TO_MS(100)); // Simulate work with a delay
-        xSemaphoreGive(semaphores[nextTask]);
+void init_uart_hc06(void) {
+    uart_init(HC06_UART_ID, HC06_BAUD_RATE);
+
+    gpio_set_function(HC06_TX_PIN, UART_FUNCSEL_NUM(HC06_UART_ID, HC06_TX_PIN));
+    gpio_set_function(HC06_RX_PIN, UART_FUNCSEL_NUM(HC06_UART_ID, HC06_RX_PIN));
+
+    int __unused actual = uart_set_baudrate(HC06_UART_ID, HC06_BAUD_RATE);
+
+    uart_set_hw_flow(HC06_UART_ID, false, false);
+
+    uart_set_format(HC06_UART_ID, 8, 1, UART_PARITY_NONE);
+}
+
+void init_uart_irq() {
+     // Turn off FIFO's - we want to do this character by character
+    uart_set_fifo_enabled(HC06_UART_ID, false);
+
+    // Set up a RX interrupt
+    // We need to set up the handler first
+    // Select correct interrupt for the UART we are using
+    int UART_IRQ = HC06_UART_ID == uart0 ? UART0_IRQ : UART1_IRQ;
+
+    // And set up and enable the interrupt handlers
+    irq_set_exclusive_handler(UART_IRQ, uart_rx_handler);
+    irq_set_enabled(UART_IRQ, true);
+
+    // Now enable the UART to send interrupts - RX only
+    uart_set_irq_enables(HC06_UART_ID, true, false);
+}
+
+static void tx_task(void *p) {
+    uint8_t ch;
+    while (true) {
+        if (xQueueReceive(xQueueTX, &ch, portMAX_DELAY) == pdTRUE) {
+            uart_putc_raw(HC06_UART_ID, ch);
+        }
     }
 }
 
-int main(void)
-{
+static void serial_task(void* p) {
+    uint8_t ch;
+    while (true) {
+        int c = getchar_timeout_us(0);
+        if (c != PICO_ERROR_TIMEOUT) {
+            ch = (uint8_t)c;
+            xQueueSend(xQueueTX, &ch, 0);
+        }
+
+        while (xQueueReceive(xQueueRX, &ch, 0) == pdTRUE) {
+            putchar_raw(ch);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void btn_callback(uint gpio, uint32_t events) {
+    if (gpio == BTN_PIN && events == GPIO_IRQ_EDGE_FALL) {
+        xSemaphoreGiveFromISR(xSemaphorePIN, 0);
+    } 
+}
+
+
+// Funcoes auxiliares
+void init_buttons(void) {
+    gpio_init(BTN_PIN);
+    gpio_set_dir(BTN_PIN, GPIO_IN);
+    gpio_pull_up(BTN_PIN);
+    gpio_set_irq_enabled_with_callback(BTN_PIN, GPIO_IRQ_EDGE_FALL, true, &btn_callback);
+}
+
+
+// Tasks
+void pin_task(void *p) {
+    config_data_t data;
+    data.name = HC06_NAME;
+
+    char pin[5];
+    srand(time_us_32());
+    while (true) {
+        if (xSemaphoreTake(xSemaphorePIN, pdMS_TO_TICKS(10))) {
+            for (int i = 0; i < 4; i++) {
+                pin[i] = '0' + rand() % 10;
+            }
+            pin[4] = '\x0';
+            data.pin = pin;
+
+        }
+    }
+}
+
+int main(void) {
     stdio_init_all();
+    init_buttons();
+    init_uart_hc06();
 
+    xSemaphorePIN = xSemaphoreCreateBinary();
 
-    for (int i = 0; i < 4; i++)
-    {
-        semaphores[i] = xSemaphoreCreateBinary();
-    }
+    xQueuePIN = xQueueCreate(32, sizeof(char[5]));
+    xQueueConfig = xQueueCreate(32, sizeof(config_data_t));
 
-    for (int i = 0; i < 4; i++)
-    {
-        char name[10];
-        snprintf(name, sizeof(name), "Task%d", i + 1);
-        xTaskCreate(vTask, name, configMINIMAL_STACK_SIZE, (void *)i, 1, NULL);
-    }
-
-    xSemaphoreGive(semaphores[0]);
+    xTaskCreate(pin_task, "Task do PIN", 256, NULL, 1, NULL);
 
     vTaskStartScheduler();
 
     // Should never reach here
-    for (;;);
+    for (;;)
+        ;
 }
