@@ -2,7 +2,6 @@
 #include "task.h"
 #include "semphr.h"
 #include <stdio.h>
-
 #include <stdlib.h>
 #include "pico/stdlib.h"
 #include "hardware/irq.h"
@@ -17,18 +16,13 @@
 // Tela OLED
 ssd1306_t disp;
 
-// Pinos da Tela
-const uint GPIO_14 = 14;
-const uint GPIO_15 = 15;
-const uint GPIO_16 = 16;
-const uint GPIO_17 = 17;
-
 // PINS
+#define LED_R 13
+#define LED_G 14
+#define LED_B 15
+#define BTN_PIN 16
 #define PIN_X 27
 #define PIN_Y 26
-#define BTN_PIN 16
-
-#define UART_ID uart0
 #define BAUD_RATE 115200
 
 // Semaforos
@@ -44,12 +38,17 @@ typedef struct config_data {
     char *pin;
 } config_data_t;
 
+typedef struct rgb {
+    int red;
+    int green;
+    int blue;
+} rgb_t;
+
 // Filas
-QueueHandle_t xQueuePIN;
-QueueHandle_t xQueueConfig;
 QueueHandle_t xQueueRX;
 QueueHandle_t xQueueTX;
 QueueHandle_t xQueueADC;
+QueueHandle_t xQueueRGB;
 
 void uart_rx_handler() {
     uint8_t ch = uart_getc(HC06_UART_ID);
@@ -158,10 +157,10 @@ void uart_task(void *p) {
 
     while (true) {
         if (xQueueReceive(xQueueADC, &data, pdMS_TO_TICKS(50))) {
-            uart_putc(UART_ID, data.axis);
-            uart_putc(UART_ID, data.value);
-            uart_putc(UART_ID, (data.value >> 8));
-            uart_putc(UART_ID, -1);
+            uart_putc(HC06_UART_ID, data.axis);
+            uart_putc(HC06_UART_ID, data.value);
+            uart_putc(HC06_UART_ID, (data.value >> 8));
+            uart_putc(HC06_UART_ID, -1);
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -169,37 +168,46 @@ void uart_task(void *p) {
 }
 
 void pin_task(void *p) {
-    config_data_t data;
-    data.name = "RAFA";
-
     char pin[5];
     srand(time_us_32());
+
     while (true) {
         if (xSemaphoreTake(xSemaphorePIN, pdMS_TO_TICKS(10))) {
             for (int i = 0; i < 4; i++) {
                 pin[i] = '0' + rand() % 10;
             }
             pin[4] = '\x0';
-            data.pin = pin;
             
             ssd1306_clear(&disp);
-            ssd1306_draw_string(&disp, 64, 16, 1, pin);
+            ssd1306_draw_string(&disp, 8, 12, 2, "PIN: ");
+            ssd1306_draw_string(&disp, 64, 12, 2, pin);
             ssd1306_show(&disp);
+            hc06_config("RAFA", pin);
         }
-
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
+//Callbacks
 void btn_callback(uint gpio, uint32_t events) {
     if (gpio == BTN_PIN && events == GPIO_IRQ_EDGE_FALL) {
         xSemaphoreGiveFromISR(xSemaphorePIN, 0);
     } 
 }
 
+void pwm_task(void *p) {
+    rgb_t rgb_data;
+
+    while (true) {
+        if (xQueueReceive(xQueueRGB, &rgb_data, pdMS_TO_TICKS(50))) {
+            // Mudar cores
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
 
 // Funcoes auxiliares
-void init_buttons(void) {
+void gpio_config(void) {
     gpio_init(BTN_PIN);
     gpio_set_dir(BTN_PIN, GPIO_IN);
     gpio_pull_up(BTN_PIN);
@@ -236,47 +244,29 @@ void oled_init(void) {
     ssd1306_show(&disp);
 }
 
-void gpio_config(void) {
+void pwm_init(void) {
     
-    gpio_init(GPIO_14);
-    gpio_set_dir(GPIO_14, GPIO_IN);
-    gpio_pull_up(GPIO_14);
-
-    gpio_init(GPIO_15);
-    gpio_set_dir(GPIO_15, GPIO_IN);
-    gpio_pull_up(GPIO_15);
-    
-    gpio_init(GPIO_16);
-    gpio_set_dir(GPIO_16, GPIO_IN);
-    gpio_pull_up(GPIO_16);
-    
-    gpio_init(GPIO_17);
-    gpio_set_dir(GPIO_17, GPIO_IN);
-    gpio_pull_up(GPIO_17);
 }
 
 int main(void) {
     stdio_init_all();
 
-    init_buttons();
+    gpio_config();
     init_uart_hc06();
     
-    gpio_config();
     oled_init();
 
     ssd1306_clear(&disp);
-    ssd1306_draw_string(&disp, 8, 12, 1, "Iniciando...");
+    ssd1306_draw_string(&disp, 8, 12, 2, "Aguardando");
     ssd1306_show(&disp);
-    sleep_ms(1000);
     ssd1306_clear(&disp);
 
     xSemaphorePIN = xSemaphoreCreateBinary();
 
-    xQueuePIN = xQueueCreate(32, sizeof(char[5]));
-    xQueueConfig = xQueueCreate(32, sizeof(config_data_t));
     xQueueRX = xQueueCreate(32, sizeof(uint8_t));
     xQueueTX = xQueueCreate(32, sizeof(uint8_t));
     xQueueADC = xQueueCreate(32, sizeof(adc_t));
+    xQueueRGB = xQueueCreate(32, sizeof(rgb_t));
 
     xTaskCreate(pin_task, "Task do PIN", 256, NULL, 1, NULL);
     xTaskCreate(tx_task, "TX", 512, NULL, 2, NULL);
