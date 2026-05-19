@@ -11,17 +11,21 @@ add_executable(pico_emb
     main.c
     hc06.c
     hc06.h
+    ssd1306/ssd1306.c
     )
-
-target_include_directories(pico_emb PRIVATE
+    
+    target_include_directories(pico_emb PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/ssd1306
     )
-
-# Linking to FreeRTOS-Kernel-Heap4 means we use a dynamic heap for allocations
-target_link_libraries(pico_emb PRIVATE
+    
+    # Linking to FreeRTOS-Kernel-Heap4 means we use a dynamic heap for allocations
+    target_link_libraries(pico_emb PRIVATE
     pico_async_context_freertos
     FreeRTOS-Kernel-Heap4
     pico_stdlib
+    hardware_adc
+    hardware_i2c
     )
 # Set the nunber of cores to 1.
 # This defaults to 2 in FreeRTOSConfig_examples_common.h if not defined in here

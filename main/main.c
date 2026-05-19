@@ -6,9 +6,22 @@
 #include <stdlib.h>
 #include "pico/stdlib.h"
 #include "hardware/irq.h"
+#include "hardware/gpio.h"
 #include "hardware/uart.h"
 #include "hardware/adc.h"
+#include "hardware/i2c.h"
+#include "ssd1306.h"
 #include "hc06.h"
+
+
+// Tela OLED
+ssd1306_t disp;
+
+// Pinos da Tela
+const uint GPIO_14 = 14;
+const uint GPIO_15 = 15;
+const uint GPIO_16 = 16;
+const uint GPIO_17 = 17;
 
 // PINS
 #define PIN_X 27
@@ -168,8 +181,13 @@ void pin_task(void *p) {
             }
             pin[4] = '\x0';
             data.pin = pin;
-
+            
+            ssd1306_clear(&disp);
+            ssd1306_draw_string(&disp, 64, 16, 1, pin);
+            ssd1306_show(&disp);
         }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -201,12 +219,56 @@ void init_uart_hc06(void) {
     uart_set_format(HC06_UART_ID, 8, 1, UART_PARITY_NONE);
 }
 
+void oled_init(void) {
+    i2c_init(i2c1, 400000);
 
+    gpio_set_function(2, GPIO_FUNC_I2C);
+    gpio_set_function(3, GPIO_FUNC_I2C);
+
+    gpio_pull_up(2);
+    gpio_pull_up(3);
+
+    disp.external_vcc = false;
+
+    ssd1306_init(&disp, 128, 32, 0x3C, i2c1);
+
+    ssd1306_clear(&disp);
+    ssd1306_show(&disp);
+}
+
+void gpio_config(void) {
+    
+    gpio_init(GPIO_14);
+    gpio_set_dir(GPIO_14, GPIO_IN);
+    gpio_pull_up(GPIO_14);
+
+    gpio_init(GPIO_15);
+    gpio_set_dir(GPIO_15, GPIO_IN);
+    gpio_pull_up(GPIO_15);
+    
+    gpio_init(GPIO_16);
+    gpio_set_dir(GPIO_16, GPIO_IN);
+    gpio_pull_up(GPIO_16);
+    
+    gpio_init(GPIO_17);
+    gpio_set_dir(GPIO_17, GPIO_IN);
+    gpio_pull_up(GPIO_17);
+}
 
 int main(void) {
     stdio_init_all();
+
     init_buttons();
     init_uart_hc06();
+    
+    gpio_config();
+    oled_init();
+
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 8, 12, 1, "Iniciando...");
+    ssd1306_show(&disp);
+    sleep_ms(1000);
+    ssd1306_clear(&disp);
 
     xSemaphorePIN = xSemaphoreCreateBinary();
 
