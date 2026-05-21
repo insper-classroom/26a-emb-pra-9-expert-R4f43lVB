@@ -5,13 +5,13 @@
 #include <stdlib.h>
 #include "pico/stdlib.h"
 #include "hardware/irq.h"
+#include "hardware/pwm.h"
 #include "hardware/gpio.h"
 #include "hardware/uart.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
 #include "ssd1306.h"
 #include "hc06.h"
-
 
 // Tela OLED
 ssd1306_t disp;
@@ -23,22 +23,16 @@ ssd1306_t disp;
 #define BTN_PIN 16
 #define PIN_X 27
 #define PIN_Y 26
-#define BAUD_RATE 115200
 
 // Semaforos
 SemaphoreHandle_t xSemaphorePIN;
 
-typedef struct adc {
+typedef struct {
     int axis;
     int value;
 } adc_t;
 
-typedef struct config_data {
-    char *name;
-    char *pin;
-} config_data_t;
-
-typedef struct rgb {
+typedef struct {
     int red;
     int green;
     int blue;
@@ -50,13 +44,21 @@ QueueHandle_t xQueueTX;
 QueueHandle_t xQueueADC;
 QueueHandle_t xQueueRGB;
 
+// Callbacks
+void gpio_callback(uint gpio, uint32_t events) {
+    if (gpio == BTN_PIN && events == GPIO_IRQ_EDGE_FALL) {
+        xSemaphoreGiveFromISR(xSemaphorePIN, 0);
+    }
+}
+
+// Tasks
 void uart_rx_handler() {
     uint8_t ch = uart_getc(HC06_UART_ID);
     xQueueSendFromISR(xQueueRX, &ch, 0);
 }
 
 void init_uart_irq() {
-     // Turn off FIFO's - we want to do this character by character
+    // Turn off FIFO's - we want to do this character by character
     uart_set_fifo_enabled(HC06_UART_ID, false);
 
     // Set up a RX interrupt
@@ -73,15 +75,20 @@ void init_uart_irq() {
 }
 
 static void tx_task(void *p) {
-    uint8_t ch;
+    adc_t data;
+
     while (true) {
-        if (xQueueReceive(xQueueTX, &ch, portMAX_DELAY) == pdTRUE) {
-            uart_putc_raw(HC06_UART_ID, ch);
+        if (xQueueReceive(xQueueTX, &data, portMAX_DELAY) == pdTRUE) {
+            uart_putc_raw(HC06_UART_ID, data.axis);
+            uart_putc_raw(HC06_UART_ID, data.value);
+            uart_putc_raw(HC06_UART_ID, data.value >> 8);
+            uart_putc_raw(HC06_UART_ID, -1);
         }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
-static void serial_task(void* p) {
+static void serial_task(void *p) {
     uint8_t ch;
     while (true) {
         int c = getchar_timeout_us(0);
@@ -99,8 +106,6 @@ static void serial_task(void* p) {
 }
 
 void x_task(void *p) {
-    adc_gpio_init(PIN_X);
-
     adc_t data;
     data.axis = 0;
 
@@ -109,16 +114,17 @@ void x_task(void *p) {
     while (true) {
         int result;
         adc_select_input(1);
-        result = ((int) adc_read() - 2047) / 8;
+        result = ((int)adc_read() - 2047) / 8;
 
         int velho = numeros[0];
-        for (int i = 0; i < 4; i++) numeros[i] = numeros[i+1];
+        for (int i = 0; i < 4; i++)
+            numeros[i] = numeros[i + 1];
         numeros[4] = result;
         soma += result - velho;
         int media = soma / 5;
         if (media > 50 || media < -50) {
             data.value = media;
-            xQueueSend(xQueueADC, &data, pdMS_TO_TICKS(50));
+            xQueueSend(xQueueTX, &data, pdMS_TO_TICKS(50));
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -126,8 +132,6 @@ void x_task(void *p) {
 }
 
 void y_task(void *p) {
-    adc_gpio_init(PIN_Y);
-
     adc_t data;
     data.axis = 1;
 
@@ -136,16 +140,17 @@ void y_task(void *p) {
     while (true) {
         int result;
         adc_select_input(0);
-        result = ((int) adc_read() - 2047) / 8;
+        result = ((int)adc_read() - 2047) / 8;
 
         int velho = numeros[0];
-        for (int i = 0; i < 4; i++) numeros[i] = numeros[i+1];
+        for (int i = 0; i < 4; i++)
+            numeros[i] = numeros[i + 1];
         numeros[4] = result;
         soma += result - velho;
         int media = soma / 5;
         if (media > 50 || media < -50) {
             data.value = media;
-            xQueueSend(xQueueADC, &data, pdMS_TO_TICKS(50));
+            xQueueSend(xQueueTX, &data, pdMS_TO_TICKS(50));
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -167,39 +172,39 @@ void uart_task(void *p) {
     }
 }
 
-void pin_task(void *p) {
+void bluetooth_task(void *p) {
     char pin[5];
-    srand(time_us_32());
 
     while (true) {
         if (xSemaphoreTake(xSemaphorePIN, pdMS_TO_TICKS(10))) {
+            srand(time_us_32());
+            ssd1306_clear(&disp);
+            ssd1306_draw_string(&disp, 8, 12, 1, "Configurando HC06");
+            ssd1306_show(&disp);
+
             for (int i = 0; i < 4; i++) {
                 pin[i] = '0' + rand() % 10;
             }
             pin[4] = '\x0';
-            
+            hc06_config("RAFAEL", pin);
             ssd1306_clear(&disp);
             ssd1306_draw_string(&disp, 8, 12, 2, "PIN: ");
             ssd1306_draw_string(&disp, 64, 12, 2, pin);
             ssd1306_show(&disp);
-            hc06_config("RAFA", pin);
+
+            xTaskCreate(tx_task, "TX", 1024, NULL, 2, NULL);
+            xTaskCreate(x_task, "Task X", 1024, NULL, 1, NULL);
+            xTaskCreate(y_task, "Task Y", 1024, NULL, 1, NULL);
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
-//Callbacks
-void btn_callback(uint gpio, uint32_t events) {
-    if (gpio == BTN_PIN && events == GPIO_IRQ_EDGE_FALL) {
-        xSemaphoreGiveFromISR(xSemaphorePIN, 0);
-    } 
-}
-
 void pwm_task(void *p) {
-    rgb_t rgb_data;
+    rgb_t color;
 
     while (true) {
-        if (xQueueReceive(xQueueRGB, &rgb_data, pdMS_TO_TICKS(50))) {
+        if (xQueueReceive(xQueueRGB, &color, pdMS_TO_TICKS(50))) {
             // Mudar cores
         }
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -211,7 +216,12 @@ void gpio_config(void) {
     gpio_init(BTN_PIN);
     gpio_set_dir(BTN_PIN, GPIO_IN);
     gpio_pull_up(BTN_PIN);
-    gpio_set_irq_enabled_with_callback(BTN_PIN, GPIO_IRQ_EDGE_FALL, true, &btn_callback);
+    gpio_set_irq_enabled_with_callback(BTN_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+
+    // gpio_init(HC06_STATE_PIN);
+    // gpio_set_dir(HC06_STATE_PIN, GPIO_IN);
+    // gpio_pull_up(HC06_STATE_PIN);
+    // gpio_set_irq_enabled(HC06_STATE_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);
 }
 
 void init_uart_hc06(void) {
@@ -244,16 +254,39 @@ void oled_init(void) {
     ssd1306_show(&disp);
 }
 
-void pwm_init(void) {
-    
+void init_pwm(void) {
+    gpio_set_function(LED_R, GPIO_FUNC_PWM);
+    gpio_set_function(LED_G, GPIO_FUNC_PWM);
+    gpio_set_function(LED_B, GPIO_FUNC_PWM);
+
+    uint slice_r = pwm_gpio_to_slice_num(LED_R);
+    uint slice_g = pwm_gpio_to_slice_num(LED_G);
+    uint slice_b = pwm_gpio_to_slice_num(LED_B);
+
+    pwm_set_gpio_level(LED_R, 0);
+    pwm_set_gpio_level(LED_G, 0);
+    pwm_set_gpio_level(LED_B, 0);
+
+    pwm_set_wrap(slice_r, 255);
+    pwm_set_wrap(slice_g, 255);
+    pwm_set_wrap(slice_b, 255);
+
+    pwm_set_enabled(slice_r, true);
+    pwm_set_enabled(slice_g, true);
+    pwm_set_enabled(slice_b, true);
 }
 
+// Funcao principal
 int main(void) {
     stdio_init_all();
+    adc_init();
+
+    adc_gpio_init(PIN_Y);
+    adc_gpio_init(PIN_X);
 
     gpio_config();
     init_uart_hc06();
-    
+    init_pwm();
     oled_init();
 
     ssd1306_clear(&disp);
@@ -263,14 +296,12 @@ int main(void) {
 
     xSemaphorePIN = xSemaphoreCreateBinary();
 
-    xQueueRX = xQueueCreate(32, sizeof(uint8_t));
-    xQueueTX = xQueueCreate(32, sizeof(uint8_t));
-    xQueueADC = xQueueCreate(32, sizeof(adc_t));
+    // xQueueRX = xQueueCreate(32, sizeof(uint8_t));
+    xQueueTX = xQueueCreate(32, sizeof(adc_t));
+    // xQueueADC = xQueueCreate(32, sizeof(adc_t));
     xQueueRGB = xQueueCreate(32, sizeof(rgb_t));
 
-    xTaskCreate(pin_task, "Task do PIN", 256, NULL, 1, NULL);
-    xTaskCreate(tx_task, "TX", 512, NULL, 2, NULL);
-    xTaskCreate(serial_task, "Serial", 1024, NULL, 1, NULL);
+    xTaskCreate(bluetooth_task, "Task PIN", 256, NULL, 1, NULL);
 
     vTaskStartScheduler();
 

@@ -26,6 +26,8 @@ add_executable(pico_emb
     pico_stdlib
     hardware_adc
     hardware_i2c
+    hardware_pwm
+    hardware_uart
     )
 # Set the nunber of cores to 1.
 # This defaults to 2 in FreeRTOSConfig_examples_common.h if not defined in here
