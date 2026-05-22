@@ -26,28 +26,25 @@ ssd1306_t disp;
 
 // Semaforos
 SemaphoreHandle_t xSemaphorePIN;
+SemaphoreHandle_t xSemaphoreConnection;
 
 typedef struct {
     int axis;
     int value;
 } adc_t;
 
-typedef struct {
-    int red;
-    int green;
-    int blue;
-} rgb_t;
-
 // Filas
 QueueHandle_t xQueueRX;
 QueueHandle_t xQueueTX;
 QueueHandle_t xQueueADC;
-QueueHandle_t xQueueRGB;
 
 // Callbacks
 void gpio_callback(uint gpio, uint32_t events) {
-    if (gpio == BTN_PIN && events == GPIO_IRQ_EDGE_FALL) {
+
+    if (gpio == BTN_PIN && events == 0x4) {
         xSemaphoreGiveFromISR(xSemaphorePIN, 0);
+    } else if (gpio == HC06_STATE_PIN) {
+        xSemaphoreGiveFromISR(xSemaphoreConnection, 0);
     }
 }
 
@@ -84,7 +81,7 @@ static void tx_task(void *p) {
             uart_putc_raw(HC06_UART_ID, data.value >> 8);
             uart_putc_raw(HC06_UART_ID, -1);
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(15));
     }
 }
 
@@ -110,24 +107,24 @@ void x_task(void *p) {
     data.axis = 0;
 
     int soma = 0;
-    int numeros[5] = {0, 0, 0, 0, 0};
+    int numeros[6] = {0, 0, 0, 0, 0, 0};
     while (true) {
         int result;
         adc_select_input(1);
         result = ((int)adc_read() - 2047) / 8;
 
         int velho = numeros[0];
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 5; i++)
             numeros[i] = numeros[i + 1];
-        numeros[4] = result;
+        numeros[5] = result;
         soma += result - velho;
-        int media = soma / 5;
+        int media = soma / 6;
         if (media > 50 || media < -50) {
             data.value = media;
-            xQueueSend(xQueueTX, &data, pdMS_TO_TICKS(50));
+            xQueueSend(xQueueTX, &data, pdMS_TO_TICKS(10));
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -136,24 +133,25 @@ void y_task(void *p) {
     data.axis = 1;
 
     int soma = 0;
-    int numeros[5] = {0, 0, 0, 0, 0};
+    int numeros[6] = {0, 0, 0, 0, 0, 0};
     while (true) {
         int result;
         adc_select_input(0);
         result = ((int)adc_read() - 2047) / 8;
 
         int velho = numeros[0];
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 5; i++)
             numeros[i] = numeros[i + 1];
-        numeros[4] = result;
+        numeros[5] = result;
         soma += result - velho;
-        int media = soma / 5;
+        int media = soma / 6;
         if (media > 50 || media < -50) {
+            // printf("Media Y: %d\n", media);
             data.value = media;
-            xQueueSend(xQueueTX, &data, pdMS_TO_TICKS(50));
+            xQueueSend(xQueueTX, &data, pdMS_TO_TICKS(10));
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -186,7 +184,7 @@ void bluetooth_task(void *p) {
                 pin[i] = '0' + rand() % 10;
             }
             pin[4] = '\x0';
-            hc06_config("RAFAEL", pin);
+            hc06_config("Jefferson", pin);
             ssd1306_clear(&disp);
             ssd1306_draw_string(&disp, 8, 12, 2, "PIN: ");
             ssd1306_draw_string(&disp, 64, 12, 2, pin);
@@ -201,11 +199,28 @@ void bluetooth_task(void *p) {
 }
 
 void pwm_task(void *p) {
-    rgb_t color;
-
+    static int connected = 0;
+    uint slice_r = pwm_gpio_to_slice_num(LED_R);
+    uint slice_g = pwm_gpio_to_slice_num(LED_G);
+    uint slice_b = pwm_gpio_to_slice_num(LED_B);
     while (true) {
-        if (xQueueReceive(xQueueRGB, &color, pdMS_TO_TICKS(50))) {
-            // Mudar cores
+        if (xSemaphoreTake(xSemaphoreConnection, pdMS_TO_TICKS(20))) {
+            connected = !connected;
+        }
+        // printf("Connected: %d\n", connected);
+
+        if (connected) {
+            pwm_set_gpio_level(LED_R, 0);
+            pwm_set_gpio_level(LED_G, 255);
+            pwm_set_gpio_level(LED_B, 0);
+
+            pwm_set_wrap(slice_r, 255);
+            pwm_set_wrap(slice_g, 255);
+            pwm_set_wrap(slice_b, 255);
+
+            pwm_set_enabled(slice_r, true);
+            pwm_set_enabled(slice_g, true);
+            pwm_set_enabled(slice_b, true);
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -216,12 +231,11 @@ void gpio_config(void) {
     gpio_init(BTN_PIN);
     gpio_set_dir(BTN_PIN, GPIO_IN);
     gpio_pull_up(BTN_PIN);
-    gpio_set_irq_enabled_with_callback(BTN_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    gpio_set_irq_enabled_with_callback(BTN_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
 
-    // gpio_init(HC06_STATE_PIN);
-    // gpio_set_dir(HC06_STATE_PIN, GPIO_IN);
-    // gpio_pull_up(HC06_STATE_PIN);
-    // gpio_set_irq_enabled(HC06_STATE_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);
+    gpio_init(HC06_STATE_PIN);
+    gpio_set_dir(HC06_STATE_PIN, GPIO_IN);
+    gpio_set_irq_enabled(HC06_STATE_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);
 }
 
 void init_uart_hc06(void) {
@@ -258,22 +272,6 @@ void init_pwm(void) {
     gpio_set_function(LED_R, GPIO_FUNC_PWM);
     gpio_set_function(LED_G, GPIO_FUNC_PWM);
     gpio_set_function(LED_B, GPIO_FUNC_PWM);
-
-    uint slice_r = pwm_gpio_to_slice_num(LED_R);
-    uint slice_g = pwm_gpio_to_slice_num(LED_G);
-    uint slice_b = pwm_gpio_to_slice_num(LED_B);
-
-    pwm_set_gpio_level(LED_R, 0);
-    pwm_set_gpio_level(LED_G, 0);
-    pwm_set_gpio_level(LED_B, 0);
-
-    pwm_set_wrap(slice_r, 255);
-    pwm_set_wrap(slice_g, 255);
-    pwm_set_wrap(slice_b, 255);
-
-    pwm_set_enabled(slice_r, true);
-    pwm_set_enabled(slice_g, true);
-    pwm_set_enabled(slice_b, true);
 }
 
 // Funcao principal
@@ -295,13 +293,12 @@ int main(void) {
     ssd1306_clear(&disp);
 
     xSemaphorePIN = xSemaphoreCreateBinary();
+    xSemaphoreConnection = xSemaphoreCreateBinary();
 
-    // xQueueRX = xQueueCreate(32, sizeof(uint8_t));
     xQueueTX = xQueueCreate(32, sizeof(adc_t));
-    // xQueueADC = xQueueCreate(32, sizeof(adc_t));
-    xQueueRGB = xQueueCreate(32, sizeof(rgb_t));
 
     xTaskCreate(bluetooth_task, "Task PIN", 256, NULL, 1, NULL);
+    xTaskCreate(pwm_task, "PWM Task", 128, NULL, 1, NULL);
 
     vTaskStartScheduler();
 
