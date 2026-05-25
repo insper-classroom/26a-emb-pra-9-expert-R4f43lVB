@@ -40,18 +40,15 @@ QueueHandle_t xQueueADC;
 
 // Callbacks
 void gpio_callback(uint gpio, uint32_t events) {
-
-    if (gpio == BTN_PIN && events == 0x4) {
+    if (gpio == BTN_PIN) {
         xSemaphoreGiveFromISR(xSemaphorePIN, 0);
-    } else if (gpio == HC06_STATE_PIN) {
-        xSemaphoreGiveFromISR(xSemaphoreConnection, 0);
     }
 }
 
 // Tasks
 void uart_rx_handler() {
-    uint8_t ch = uart_getc(HC06_UART_ID);
-    xQueueSendFromISR(xQueueRX, &ch, 0);
+    uart_getc(HC06_UART_ID);
+        xSemaphoreGiveFromISR(xSemaphoreConnection, 0);
 }
 
 void init_uart_irq() {
@@ -146,7 +143,6 @@ void y_task(void *p) {
         soma += result - velho;
         int media = soma / 6;
         if (media > 50 || media < -50) {
-            // printf("Media Y: %d\n", media);
             data.value = media;
             xQueueSend(xQueueTX, &data, pdMS_TO_TICKS(10));
         }
@@ -184,12 +180,15 @@ void bluetooth_task(void *p) {
                 pin[i] = '0' + rand() % 10;
             }
             pin[4] = '\x0';
+            
             hc06_config("Jefferson", pin);
+            
             ssd1306_clear(&disp);
             ssd1306_draw_string(&disp, 8, 12, 2, "PIN: ");
             ssd1306_draw_string(&disp, 64, 12, 2, pin);
             ssd1306_show(&disp);
-
+            
+            init_uart_irq();
             xTaskCreate(tx_task, "TX", 1024, NULL, 2, NULL);
             xTaskCreate(x_task, "Task X", 1024, NULL, 1, NULL);
             xTaskCreate(y_task, "Task Y", 1024, NULL, 1, NULL);
@@ -199,25 +198,44 @@ void bluetooth_task(void *p) {
 }
 
 void pwm_task(void *p) {
-    static int connected = 0;
     uint slice_r = pwm_gpio_to_slice_num(LED_R);
+    const uint chan_r = pwm_gpio_to_channel(LED_R);
+
     uint slice_g = pwm_gpio_to_slice_num(LED_G);
+    // const uint chan_g = pwm_gpio_to_channel(LED_G);
+    
     uint slice_b = pwm_gpio_to_slice_num(LED_B);
+    const uint chan_b = pwm_gpio_to_channel(LED_B);
+    
+    static int flag_state = 0;
+
     while (true) {
         if (xSemaphoreTake(xSemaphoreConnection, pdMS_TO_TICKS(20))) {
-            connected = !connected;
+            flag_state = !flag_state;
+            // printf("valor do state: %d\n", flag_state);
         }
-        // printf("Connected: %d\n", connected);
 
-        if (connected) {
+        if (!flag_state) {
+            pwm_set_gpio_level(LED_G, 0);
+            for (int i = 0; i <= 255; i++) {
+                pwm_set_chan_level(slice_r, chan_r, i);
+                pwm_set_chan_level(slice_b, chan_b, i);
+                vTaskDelay(pdMS_TO_TICKS(5));
+            }
+            for (int i = 255; i >= 0; i--) {
+                pwm_set_chan_level(slice_r, chan_r, i);
+                pwm_set_chan_level(slice_b, chan_b, i);
+                vTaskDelay(pdMS_TO_TICKS(5));
+            }
+        } else {
             pwm_set_gpio_level(LED_R, 0);
             pwm_set_gpio_level(LED_G, 255);
             pwm_set_gpio_level(LED_B, 0);
-
+            
             pwm_set_wrap(slice_r, 255);
             pwm_set_wrap(slice_g, 255);
             pwm_set_wrap(slice_b, 255);
-
+            
             pwm_set_enabled(slice_r, true);
             pwm_set_enabled(slice_g, true);
             pwm_set_enabled(slice_b, true);
@@ -231,11 +249,7 @@ void gpio_config(void) {
     gpio_init(BTN_PIN);
     gpio_set_dir(BTN_PIN, GPIO_IN);
     gpio_pull_up(BTN_PIN);
-    gpio_set_irq_enabled_with_callback(BTN_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
-
-    gpio_init(HC06_STATE_PIN);
-    gpio_set_dir(HC06_STATE_PIN, GPIO_IN);
-    gpio_set_irq_enabled(HC06_STATE_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);
+    gpio_set_irq_enabled_with_callback(BTN_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
 }
 
 void init_uart_hc06(void) {
